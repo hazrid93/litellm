@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import { AgentTracesSection } from "./AgentTracesSection";
 import { useTracesLive } from "../api";
 import { useRangeHoursRouting } from "../routing";
+import type { InvestigateScope } from "../../route";
 
 const TIME_FORMAT = "YYYY-MM-DDTHH:mm:ss";
 
@@ -15,12 +16,14 @@ export default function AgentTracesPage({
   readOnly = false,
   canMintTracingKey = false,
   canViewFindings = true,
+  onInvestigate,
 }: {
   accessToken: string;
   isActive?: boolean;
   readOnly?: boolean;
   canMintTracingKey?: boolean;
   canViewFindings?: boolean;
+  onInvestigate?: (scope: InvestigateScope) => void;
 }) {
   const sourceLive = useTracesLive();
   const [rangeHours, setRangeHours] = useRangeHoursRouting();
@@ -58,6 +61,7 @@ export default function AgentTracesPage({
         readOnly={readOnly}
         canMintTracingKey={canMintTracingKey}
         canViewFindings={canViewFindings}
+        onInvestigate={onInvestigate}
         timeControls={{ rangeHours, onRangeHoursChange: changeRange, onLiveChange: changeLive }}
       />
     </div>

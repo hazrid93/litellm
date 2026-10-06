@@ -1,5 +1,8 @@
 use crate::cache::cache_error;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use litellm_cache::{DeleteCache, DisconnectCache, PingCache};
 use litellm_host_python::{from_py, release_gil, to_py};
@@ -115,7 +118,7 @@ impl NativeCacheHandle {
     fn get(&self, py: Python<'_>, key: String) -> PyResult<Py<PyAny>> {
         self.check_process()?;
         let request = request(key, None)?;
-        let value = release_gil(py, || self.backend.lookup(&request, super::request::now()))
+        let value = release_gil(py, || self.backend.lookup(&request, now()))
             .map_err(cache_error)?;
         to_py(py, &value)
     }
@@ -132,7 +135,7 @@ impl NativeCacheHandle {
         let request = request(key, ttl)?;
         let value: Value = from_py(value)?;
         release_gil(py, || {
-            self.backend.store(&request, value, super::request::now())
+            self.backend.store(&request, value, now())
         })
         .map_err(cache_error)
     }
@@ -143,7 +146,7 @@ impl NativeCacheHandle {
         let backend = self.backend.clone();
         crate::execution::run_async(
             py,
-            async move { backend.async_lookup(&request, super::request::now()).await },
+            async move { backend.async_lookup(&request, now()).await },
             cache_error,
         )
     }
@@ -164,7 +167,7 @@ impl NativeCacheHandle {
             py,
             async move {
                 backend
-                    .async_store(&request, value, super::request::now())
+                    .async_store(&request, value, now())
                     .await
             },
             cache_error,
@@ -189,7 +192,7 @@ impl NativeCacheHandle {
             py,
             async move {
                 backend
-                    .async_store_batch(entries, super::request::now())
+                    .async_store_batch(entries, now())
                     .await
             },
             cache_error,
@@ -262,4 +265,10 @@ fn duration(seconds: f64) -> PyResult<Duration> {
         .ok()
         .filter(|value| !value.is_zero())
         .ok_or_else(|| PyValueError::new_err("cache durations must be finite and positive"))
+}
+
+fn now() -> Duration {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
 }

@@ -63,16 +63,8 @@ def _field_request(
     request: Final = {
         "key": {
             "fields": [
-                {
-                    "name": "model",
-                    "value": "gpt-4.1",
-                    "participation": "always",
-                },
-                {
-                    "name": "messages",
-                    "value": prompt,
-                    "participation": "always",
-                },
+                {"name": "model", "value": "gpt-4.1"},
+                {"name": "messages", "value": prompt},
             ],
             "namespace": namespace,
         },

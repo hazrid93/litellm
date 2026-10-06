@@ -9872,6 +9872,26 @@ class Router:
 
         return None
 
+    @staticmethod
+    def _filter_disabled_deployments(
+        deployments: Union[List, Dict],
+    ) -> Union[List, Dict]:
+        """Remove deployments administratively disabled from routing.
+
+        Disabled deployments stay in ``model_list`` so they remain visible and
+        editable in the Admin UI. ``model_info.disabled`` only controls whether
+        the router can select them.
+        """
+        if isinstance(deployments, dict):
+            if deployments.get("model_info", {}).get("disabled", False):
+                return []
+            return deployments
+        return [
+            deployment
+            for deployment in deployments
+            if not deployment.get("model_info", {}).get("disabled", False)
+        ]
+
     def _common_checks_available_deployment(
         self,
         model: str,
@@ -9900,12 +9920,22 @@ class Router:
             ) or litellm_metadata.get("user_api_key_team_id")
         # check if aliases set on litellm model alias map
         if specific_deployment is True:
-            return model, self._get_deployment_by_litellm_model(model=model)
+            deployments = self._get_deployment_by_litellm_model(model=model)
+            return model, self._filter_disabled_deployments(deployments)
         elif self.has_model_id(model):
             deployment = self.get_deployment(model_id=model)
             if deployment is not None:
                 deployment_model = deployment.litellm_params.model
-                return deployment_model, deployment.model_dump(exclude_none=True)
+                filtered_deployment = self._filter_disabled_deployments(
+                    deployment.model_dump(exclude_none=True)
+                )
+                if isinstance(filtered_deployment, dict):
+                    return deployment_model, filtered_deployment
+                raise litellm.BadRequestError(
+                    message=f"Deployment {model} is disabled",
+                    model=deployment_model,
+                    llm_provider="",
+                )
             raise ValueError(
                 f"LiteLLM Router: Trying to call specific deployment, but Model ID :{model} does not exist in Model ID map"
             )
@@ -9918,12 +9948,20 @@ class Router:
             model=model, request_team_id=request_team_id
         )
         if early is not None:
-            return early
+            early_model, early_deployments = early
+            return early_model, self._filter_disabled_deployments(early_deployments)
 
         ## get healthy deployments
         ### get all deployments
         healthy_deployments = self._get_all_deployments(
             model_name=model, team_id=request_team_id
+        )
+        _pre_disabled_filter_len = len(healthy_deployments)
+        healthy_deployments = cast(
+            List, self._filter_disabled_deployments(healthy_deployments)
+        )
+        _disabled_filter_emptied_candidates = (
+            _pre_disabled_filter_len > 0 and len(healthy_deployments) == 0
         )
         _pre_model_access_group_filter_len = len(healthy_deployments)
         healthy_deployments = self._filter_deployments_by_model_access_groups(
@@ -9940,10 +9978,25 @@ class Router:
             # check if the user sent in a deployment name instead
             # Do not fall back when access-group filtering removed every candidate;
             # _get_deployment_by_litellm_model does not re-apply that filter.
-            if _pre_model_access_group_filter_len == 0:
+            if (
+                _pre_model_access_group_filter_len == 0
+                and not _disabled_filter_emptied_candidates
+            ):
                 _litellm_model_deployments = self._get_deployment_by_litellm_model(
                     model=model
                 )
+                _pre_litellm_model_disabled_filter_len = len(
+                    _litellm_model_deployments
+                )
+                _litellm_model_deployments = cast(
+                    List,
+                    self._filter_disabled_deployments(_litellm_model_deployments),
+                )
+                if (
+                    _pre_litellm_model_disabled_filter_len > 0
+                    and len(_litellm_model_deployments) == 0
+                ):
+                    _disabled_filter_emptied_candidates = True
                 healthy_deployments = self._filter_deployments_by_model_access_groups(
                     model=model,
                     healthy_deployments=_litellm_model_deployments,
@@ -9974,6 +10027,7 @@ class Router:
             if (
                 self._has_default_fallbacks()
                 and not _access_group_filter_emptied_candidates
+                and not _disabled_filter_emptied_candidates
             ):
                 fallback_model = self._get_first_default_fallback()
                 if fallback_model:
@@ -9984,6 +10038,10 @@ class Router:
                     model = fallback_model
                     healthy_deployments = self._get_all_deployments(
                         model_name=model, team_id=request_team_id
+                    )
+                    healthy_deployments = cast(
+                        List,
+                        self._filter_disabled_deployments(healthy_deployments),
                     )
                     healthy_deployments = (
                         self._filter_deployments_by_model_access_groups(

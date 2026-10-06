@@ -498,11 +498,11 @@ async def perform_health_check(
     (so models that share the same name but have different ids are checked separately).
     When model (name) is provided, all deployments matching that name are checked.
 
-    When ``health_check_skip_disabled_background_models`` is True (via
+    Deployments with ``model_info.disabled: true`` are administratively outside
+    the router pool and are always omitted, including targeted ``/health``
+    queries. When ``health_check_skip_disabled_background_models`` is True (via
     ``general_settings.health_check_skip_disabled_background_models``), deployments
-    with ``model_info.disable_background_health_check: true`` are omitted from
-    this run (including targeted ``/health`` queries), consistent with the
-    background health loop.
+    with ``model_info.disable_background_health_check: true`` are also omitted.
 
     Returns:
         (bool): True if the health check passes, False otherwise.
@@ -543,6 +543,15 @@ async def perform_health_check(
         if _new_model_list == []:
             _new_model_list = [x for x in model_list if x["model_name"] == model]
         model_list = _new_model_list
+
+    # An administratively disabled deployment must not receive provider traffic
+    # from either automatic or manually requested health checks. Keep this
+    # guard in the shared function so every caller gets the same behavior.
+    model_list = [
+        x
+        for x in model_list
+        if not (x.get("model_info") or {}).get("disabled", False)
+    ]
 
     if health_check_skip_disabled_background_models:
         model_list = [

@@ -3003,11 +3003,16 @@ async def _run_background_health_check():
         _llm_model_list = copy.deepcopy(llm_model_list) or []
         model_count_total = len(_llm_model_list)
 
-        # filter out models that have disabled background health checks
+        # Administratively disabled deployments are outside the router pool and
+        # must not generate background traffic. Also honor the existing,
+        # health-check-only opt-out flag.
         _llm_model_list = [
             m
             for m in _llm_model_list
-            if not m.get("model_info", {}).get("disable_background_health_check", False)
+            if not m.get("model_info", {}).get("disabled", False)
+            and not m.get("model_info", {}).get(
+                "disable_background_health_check", False
+            )
         ]
         model_count_enabled = len(_llm_model_list)
         expected_peak_in_flight = model_count_enabled

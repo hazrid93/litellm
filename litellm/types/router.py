@@ -92,6 +92,9 @@ class UpdateRouterConfig(BaseModel):
     routing_strategy: Optional[str] = None
     routing_groups: Optional[List[RoutingGroup]] = None
     model_group_retry_policy: Optional[dict] = None
+    # Local patch: keep `retry_policy` on update so the Admin UI global
+    # Model Retry Settings save (POST /config/update) is not silently dropped.
+    retry_policy: Optional[dict] = None
     model_group_affinity_config: Optional[Dict[str, List[str]]] = None
     allowed_fails: Optional[int] = None
     cooldown_time: Optional[float] = None
@@ -498,6 +501,14 @@ class RetryPolicy(BaseModel):
 
     BadRequestErrorRetries: Optional[int] = None
     AuthenticationErrorRetries: Optional[int] = None
+    # Local patch: opt-in retries for HTTP 402 Payment Required (e.g. kimi-k3
+    # quota/balance exhausted). Matches by exception status_code == 402.
+    PaymentRequiredErrorRetries: Optional[int] = None
+    # Local patch: catch-all opt-in retries for any error NOT covered by the
+    # fields above (e.g. 402, 5xx variants, provider-specific codes). A retry
+    # re-runs the healthy-deployment filter, so this makes the router move
+    # to the next healthy deployment in the same model pool on any failure.
+    OtherErrorRetries: Optional[int] = None
     TimeoutErrorRetries: Optional[int] = None
     RateLimitErrorRetries: Optional[int] = None
     ContentPolicyViolationErrorRetries: Optional[int] = None

@@ -6175,6 +6175,15 @@ class Router:
                 deployment_num_retries, int
             ):
                 num_retries = deployment_num_retries
+            # Local patch: track deployments that already failed within this
+            # request, so every retry targets a DIFFERENT healthy deployment
+            # (e.g. a 402 from one kimi-k3 upstream retries on the next one)
+            # under ANY routing strategy. Reuses the upstream selection-time
+            # `_excluded_deployment_ids` filter, which is always honored.
+            _retry_excluded_deployment_ids: List[str] = []
+            _first_failed_id = getattr(original_exception, "failed_deployment_id", None)
+            if _first_failed_id is not None:
+                _retry_excluded_deployment_ids.append(_first_failed_id)
             """
             Retry Logic
             """
@@ -6243,6 +6252,12 @@ class Router:
 
             for current_attempt in range(num_retries):
                 try:
+                    # Local patch: make this retry pick a deployment that has
+                    # not already failed for this request.
+                    if _retry_excluded_deployment_ids:
+                        kwargs["_excluded_deployment_ids"] = list(
+                            _retry_excluded_deployment_ids
+                        )
                     # Update retry tracking metadata before each retry attempt
                     _metadata["attempted_retries"] = current_attempt + 1
                     _metadata["max_retries"] = num_retries
@@ -6264,6 +6279,14 @@ class Router:
                     # Always track the latest error so we raise the most
                     # recent exception instead of the first one.
                     original_exception = e
+                    # Local patch: also exclude deployments that failed during
+                    # retries, so later attempts rotate through the pool.
+                    _retry_failed_id = getattr(e, "failed_deployment_id", None)
+                    if (
+                        _retry_failed_id is not None
+                        and _retry_failed_id not in _retry_excluded_deployment_ids
+                    ):
+                        _retry_excluded_deployment_ids.append(_retry_failed_id)
 
                     ## LOGGING
                     kwargs = self.log_retry(kwargs=kwargs, e=e)
@@ -9503,6 +9526,9 @@ class Router:
             "fallbacks",
             "context_window_fallbacks",
             "model_group_retry_policy",
+            # Local patch: allow retry_policy updates via update_settings()
+            # (Admin UI global Model Retry Settings save).
+            "retry_policy",
             "model_group_alias",
             "enable_weighted_failover",
         ]

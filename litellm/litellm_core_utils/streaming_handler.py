@@ -269,6 +269,14 @@ class CustomStreamWrapper:
         if len(self.chunks) < 2:
             return
 
+        # Guard: skip repetition detection when either of the last 2 chunks
+        # has an empty choices list (usage-only / ping / metadata chunks).
+        # Fixes upstream issue #27928 (closed unmerged PRs #27966, #27974).
+        # Re-apply after any litellm upgrade.
+        if not self.chunks[-1].choices or not self.chunks[-2].choices:
+            self._repeated_messages_count = 1
+            return
+
         last_content = self.chunks[-1].choices[0].delta.content
 
         if (

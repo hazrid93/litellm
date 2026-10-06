@@ -3643,3 +3643,147 @@ async def _get_permitted_team_ids_for_spend_logs(
         ):
             permitted.append(team_obj.team_id)
     return permitted
+
+
+# --- neyobytes: token usage panel backend (litellm-neyobytes ops notes Issue 14) ---
+# Read: per model group x upstream (api_base host + deployment model), with the
+# cached / cache-write input tokens that upstreams report in usage_object.
+# LiteLLM_DailyUserSpend cannot be used: its rollup reads a top-level
+# cache_read_input_tokens key that the stored usage_object does not have (always 0),
+# and its custom_llm_provider is only "openai"/"custom_openai".
+_NB_WINDOWS = (("today", 0), ("7d", 6), ("30d", 29), ("all", None))
+_NB_METRICS = ("in", "out", "cached", "write", "req")
+
+
+def _nb_usage_sql() -> str:
+    def num(field: str) -> str:
+        # Upstreams send ints, nulls, or nothing; count only JSON numbers.
+        return (
+            f"CASE WHEN jsonb_typeof(ptd->'{field}') = 'number' "
+            f"THEN (ptd->>'{field}')::numeric::bigint END"
+        )
+
+    cols = []
+    for name, days in _NB_WINDOWS:
+        flt = "" if days is None else f" FILTER (WHERE d >= today - {days})"
+        for m in _NB_METRICS:
+            cols.append(f'coalesce(sum("{m}"){flt}, 0)::bigint AS "{name}_{m}"')
+    # OFFSET 0 stops the planner from inlining the subquery, so metadata is
+    # de-TOASTed once per row instead of once per JSON expression.
+    raw = (
+        "SELECT model_group, api_base, model, \"startTime\"::date AS d, "
+        "prompt_tokens, completion_tokens, "
+        "metadata->'usage_object'->'prompt_tokens_details' AS ptd "
+        "FROM \"LiteLLM_SpendLogs\" WHERE coalesce(model_group, '') <> '' OFFSET 0"
+    )
+    rows = (
+        "SELECT model_group, "
+        "coalesce(substring(api_base from '^[A-Za-z]+://([^/:?]+)'), '') AS host, "
+        "coalesce(model, '') AS model, d, (now() AT TIME ZONE 'utc')::date AS today, "
+        "coalesce(prompt_tokens, 0) AS \"in\", coalesce(completion_tokens, 0) AS \"out\", "
+        f"coalesce({num('cached_tokens')}, 0) AS cached, "
+        f"coalesce({num('cache_write_tokens')}, {num('cached_creation_tokens')}, 0) AS \"write\", "
+        f"1 AS req FROM ({raw}) r"
+    )
+    return (
+        'SELECT model_group AS "group", host, model, '
+        + ", ".join(cols)
+        + f" FROM ({rows}) s GROUP BY 1, 2, 3"
+    )
+
+
+_NB_USAGE_SQL = _nb_usage_sql()
+
+# Everything that is request history. Not touched: keys, users, teams, models,
+# budgets/spend counters, config, LiteLLM_AuditLog, and *_bak_* tables.
+_NB_RESET_TABLES = (
+    "LiteLLM_SpendLogs",
+    "LiteLLM_SpendLogToolIndex",
+    "LiteLLM_SpendLogGuardrailIndex",
+    "LiteLLM_ErrorLogs",
+    "LiteLLM_DailyUserSpend",
+    "LiteLLM_DailyTeamSpend",
+    "LiteLLM_DailyTagSpend",
+    "LiteLLM_DailyEndUserSpend",
+    "LiteLLM_DailyAgentSpend",
+    "LiteLLM_DailyOrganizationSpend",
+    "LiteLLM_DailyGuardrailMetrics",
+    "LiteLLM_DailyPolicyMetrics",
+)
+
+
+def _nb_require_role(user: UserAPIKeyAuth, allow_viewer: bool) -> None:
+    allowed = {LitellmUserRoles.PROXY_ADMIN.value}
+    if allow_viewer:
+        allowed.add(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value)
+    role = getattr(user.user_role, "value", user.user_role)
+    if role not in allowed:
+        raise HTTPException(status_code=403, detail="Proxy admin only")
+
+
+def _nb_db():
+    from litellm.proxy.proxy_server import prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    return prisma_client
+
+
+@router.get("/nb/token_usage", include_in_schema=False)
+async def nb_token_usage(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    _nb_require_role(user_api_key_dict, allow_viewer=True)
+    rows = await _nb_db().db.query_raw(_NB_USAGE_SQL)
+    keys = ("in", "out", "cached", "write", "req")
+    return {
+        "today_utc": datetime.now(timezone.utc).date().isoformat(),
+        "windows": [n for n, _ in _NB_WINDOWS],
+        "rows": [
+            {
+                "group": r["group"],
+                "host": r["host"],
+                "model": r["model"],
+                "w": [{k: int(r[f"{n}_{k}"] or 0) for k in keys} for n, _ in _NB_WINDOWS],
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/nb/token_usage/reset", include_in_schema=False)
+async def nb_token_usage_reset(
+    request: Request,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """Permanently delete all request logs and usage rollups. Proxy admin only."""
+    _nb_require_role(user_api_key_dict, allow_viewer=False)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or body.get("confirm") != "RESET":
+        raise HTTPException(status_code=400, detail='Send {"confirm": "RESET"}')
+    db = _nb_db().db
+    names = ", ".join(f"'{t}'" for t in _NB_RESET_TABLES)
+    present = await db.query_raw(
+        f"SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND tablename IN ({names})"
+    )
+    tables = [p["tablename"] for p in present]
+    counts = await db.query_raw(
+        'SELECT (SELECT count(*) FROM "LiteLLM_SpendLogs")::bigint AS spend_logs, '
+        '(SELECT count(*) FROM "LiteLLM_DailyUserSpend")::bigint AS daily_user_spend'
+    )
+    await db.execute_raw("TRUNCATE " + ", ".join(f'"{t}"' for t in tables))
+    verbose_proxy_logger.warning(
+        "nb token usage reset by user_id=%s: truncated %s, before=%s",
+        user_api_key_dict.user_id,
+        tables,
+        counts[0] if counts else None,
+    )
+    return {
+        "status": "success",
+        "deleted": {k: int(v) for k, v in (counts[0] if counts else {}).items()},
+        "tables": tables,
+    }
+

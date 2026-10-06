@@ -28,6 +28,8 @@ def get_num_retries_from_retry_policy(
     TimeoutErrorRetries: Optional[int] = None
     RateLimitErrorRetries: Optional[int] = None
     ContentPolicyViolationErrorRetries: Optional[int] = None
+    PaymentRequiredErrorRetries: Optional[int] = None
+    OtherErrorRetries: Optional[int] = None
     """
     # if we can find the exception then in the retry policy -> return the number of retries
 
@@ -43,6 +45,16 @@ def get_num_retries_from_retry_policy(
     if isinstance(retry_policy, dict):
         retry_policy = RetryPolicy(**retry_policy)
 
+    # Local patch: HTTP 402 (Payment Required) surfaces as a generic APIError
+    # (no dedicated exception class upstream), so match on status_code.
+    # Retry policy is checked before `should_retry_this_error` and takes
+    # precedence, so setting this makes the router move to the next healthy
+    # deployment on 402 instead of raising immediately.
+    if (
+        getattr(exception, "status_code", None) == 402
+        and retry_policy.PaymentRequiredErrorRetries is not None
+    ):
+        return retry_policy.PaymentRequiredErrorRetries
     if (
         isinstance(exception, AuthenticationError)
         and retry_policy.AuthenticationErrorRetries is not None
@@ -65,6 +77,14 @@ def get_num_retries_from_retry_policy(
         and retry_policy.BadRequestErrorRetries is not None
     ):
         return retry_policy.BadRequestErrorRetries
+    # Local patch: catch-all fallback after all specific fields. OtherErrorRetries
+    # retries ANY error not covered above (402 w/o its own field, 5xx variants,
+    # 403, provider-specific codes), so the router moves to the next healthy
+    # deployment in the same model pool. Retry policy is checked before
+    # `should_retry_this_error` and takes precedence, so this also covers errors
+    # that would otherwise raise immediately.
+    if retry_policy.OtherErrorRetries is not None:
+        return retry_policy.OtherErrorRetries
 
 
 def reset_retry_policy() -> RetryPolicy:

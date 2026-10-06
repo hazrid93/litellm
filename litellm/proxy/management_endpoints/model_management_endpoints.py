@@ -825,9 +825,9 @@ async def delete_model(
                     detail={"error": f"Model with id={model_info.id} not found in db"},
                 )
 
-            ## DELETE FROM ROUTER ##
-            if llm_router is not None:
-                llm_router.delete_deployment(id=model_info.id)
+            # Rebuild the complete DB-backed pool and routing-strategy caches.
+            # Deleting only this deployment can leave cached pool state behind.
+            await clear_cache()
 
             ## CREATE AUDIT LOG ##
             asyncio.create_task(
@@ -1004,9 +1004,10 @@ async def add_new_model(
                         user_api_key_dict=user_api_key_dict,
                         prisma_client=prisma_client,
                     )
-                await proxy_config.add_deployment(
-                    prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
-                )
+                # Rebuild the DB-backed pool after every mutation. Incremental
+                # additions can leave routing-strategy caches keyed to the old
+                # deployment set when several providers share a model group.
+                await clear_cache()
                 # don't let failed slack alert block the /model/new response
                 _alerting = general_settings.get("alerting", []) or []
                 if "slack" in _alerting:

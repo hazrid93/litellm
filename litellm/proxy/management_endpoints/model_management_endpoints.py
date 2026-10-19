@@ -1478,3 +1478,44 @@ async def clear_cache():
         verbose_proxy_logger.exception(
             f"Failed to clear cache and reload models. Due to error - {str(e)}"
         )
+
+
+
+# --- neyobytes: masked deployment API key for the Admin UI model detail (ops notes Issue 15) ---
+# The 5-character prefix is what identifies a provider account on the dashboard; the
+# rest stays masked server-side, so the response is never a usable credential.
+@router.get(
+    "/nb/model_api_key",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["model management"],
+    include_in_schema=False,
+)
+async def nb_model_api_key(
+    model_id: str,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    from litellm.proxy.proxy_server import llm_router
+
+    if llm_router is None:
+        raise HTTPException(status_code=500, detail="LLM router not loaded")
+
+    deployment = llm_router.get_deployment(model_id=model_id)
+    if deployment is None:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+
+    api_key = (llm_router.get_deployment_credentials(model_id) or {}).get("api_key")
+    if not api_key:
+        import litellm
+
+        credential_name = deployment.litellm_params.litellm_credential_name
+        for credential in litellm.credential_list:
+            if credential.credential_name == credential_name:
+                api_key = (credential.credential_values or {}).get("api_key")
+                break
+
+    if not api_key:
+        return {"model_id": model_id, "api_key_preview": None}
+
+    value = str(api_key)
+    preview = value[:5] + "*****" if len(value) > 5 else "*****"
+    return {"model_id": model_id, "api_key_preview": preview}
